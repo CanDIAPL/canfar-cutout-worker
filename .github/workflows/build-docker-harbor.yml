@@ -1,0 +1,131 @@
+name: Build and Push to CANFAR Harbor
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Optional image tag override. Defaults to HARBOR_IMAGE_TAG."
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate required inputs
+        env:
+          HARBOR_URL: ${{ secrets.HARBOR_URL }}
+          HARBOR_PROJECT: ${{ secrets.HARBOR_PROJECT }}
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+          HARBOR_REPOSITORY: ${{ secrets.HARBOR_REPOSITORY }}
+          HARBOR_IMAGE_TAG: ${{ secrets.HARBOR_IMAGE_TAG }}
+          HARBOR_IMAGE_TAG_INPUT: ${{ github.event.inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for k in HARBOR_URL HARBOR_PROJECT HARBOR_USERNAME HARBOR_PASSWORD HARBOR_REPOSITORY; do
+            if [ -z "$(printenv "$k")" ]; then
+              echo "ERROR: Missing required secret $k" >&2
+              missing=1
+            fi
+          done
+          if [ -z "$HARBOR_IMAGE_TAG" ] && [ -z "$HARBOR_IMAGE_TAG_INPUT" ]; then
+            echo "ERROR: Set HARBOR_IMAGE_TAG or provide workflow_dispatch input image_tag" >&2
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Normalize image settings
+        env:
+          HARBOR_URL: ${{ secrets.HARBOR_URL }}
+          HARBOR_PROJECT: ${{ secrets.HARBOR_PROJECT }}
+          HARBOR_REPOSITORY: ${{ secrets.HARBOR_REPOSITORY }}
+          HARBOR_IMAGE_TAG: ${{ secrets.HARBOR_IMAGE_TAG }}
+          HARBOR_IMAGE_TAG_INPUT: ${{ github.event.inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          registry="${HARBOR_URL#http://}"
+          registry="${registry#https://}"
+          registry="${registry%%/*}"
+          registry="${registry%/}"
+
+          project="${HARBOR_PROJECT#/}"
+          project="${project%/}"
+          repository="${HARBOR_REPOSITORY#/}"
+          repository="${repository%/}"
+          tag="${HARBOR_IMAGE_TAG_INPUT:-$HARBOR_IMAGE_TAG}"
+          sha_tag="sha-${GITHUB_SHA::12}"
+
+          {
+            echo "HARBOR_REGISTRY=$registry"
+            echo "IMAGE_REF=$registry/$project/$repository:$tag"
+            echo "IMAGE_SHA_REF=$registry/$project/$repository:$sha_tag"
+            echo "IMAGE_LATEST_REF=$registry/$project/$repository:latest"
+            echo "DOCKER_CONFIG=$RUNNER_TEMP/docker-config"
+          } >> "$GITHUB_ENV"
+
+      - name: Log in to Harbor
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          echo "$HARBOR_PASSWORD" | docker login "$HARBOR_REGISTRY" -u "$HARBOR_USERNAME" --password-stdin
+
+      - name: Build image
+        env:
+          DOCKER_BUILDKIT: "1"
+          BUILDKIT_PROGRESS: plain
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --cache-from type=gha,scope=canfar-cutout-worker \
+            --cache-to type=gha,scope=canfar-cutout-worker,mode=max \
+            --load \
+            -t "$IMAGE_REF" \
+            -t "$IMAGE_SHA_REF" \
+            -t canfar-cutout-worker-ci:local \
+            .
+          docker tag "$IMAGE_REF" "$IMAGE_LATEST_REF"
+
+      - name: Smoke test image
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect "$IMAGE_REF" --format '{{ index .Config.Labels "ca.nrc.cadc.skaha.type" }}')" = "headless"
+          docker run --rm --pull=never canfar-cutout-worker-ci:local sh -lc '
+            set -eu
+            python -m cutout_worker --help
+          '
+
+      - name: Push image
+        run: |
+          set -euo pipefail
+          for ref in "$IMAGE_REF" "$IMAGE_SHA_REF" "$IMAGE_LATEST_REF"; do
+            echo "Pushing: $ref"
+            docker push "$ref"
+          done
+
+      - name: Final image reference
+        run: echo "Pushed $IMAGE_REF"
+
+      - name: Clean Docker credentials
+        if: always()
+        run: |
+          rm -rf "${DOCKER_CONFIG:-}"

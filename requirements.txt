@@ -1,0 +1,3 @@
+astropy>=5.0
+numpy>=1.23
+cutout-fits @ git+https://github.com/AlecThomson/cutout-fits.git@0c05646ee0d31b88caa2a7b7a828a89d37f3b0b4
