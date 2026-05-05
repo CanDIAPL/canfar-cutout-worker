@@ -109,10 +109,115 @@ jobs:
         run: |
           set -euo pipefail
           test "$(docker image inspect "$IMAGE_REF" --format '{{ index .Config.Labels "ca.nrc.cadc.skaha.type" }}')" = "headless"
-          docker run --rm --pull=never canfar-cutout-worker-ci:local sh -lc '
+          workdir="$RUNNER_TEMP/cutout-worker-smoke"
+          mkdir -p "$workdir"
+          docker run --rm --pull=never -v "$workdir:/work" canfar-cutout-worker-ci:local sh -lc "
             set -eu
             python -m cutout_worker --help
-          '
+            python - <<'PY'
+import json
+import os
+import numpy as np
+from astropy.io import fits
+from astropy.wcs import WCS
+
+work = "/work"
+os.makedirs(work, exist_ok=True)
+os.makedirs(f"{work}/job-astropy", exist_ok=True)
+os.makedirs(f"{work}/job-cutout-fits", exist_ok=True)
+os.makedirs(f"{work}/outputs", exist_ok=True)
+
+def make_header():
+    w = WCS(naxis=2)
+    w.wcs.crpix = [60.0, 60.0]
+    w.wcs.cdelt = [-0.01, 0.01]
+    w.wcs.crval = [180.0, 0.0]
+    w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+    return w.to_header()
+
+header2d = make_header()
+fits.PrimaryHDU(data=np.arange(120*120, dtype=np.float32).reshape(120, 120), header=header2d).writeto(f"{work}/source2d.fits", overwrite=True)
+
+header3d = make_header()
+header3d["NAXIS"] = 3
+header3d["NAXIS1"] = 120
+header3d["NAXIS2"] = 120
+header3d["NAXIS3"] = 4
+header3d["CTYPE3"] = "FREQ"
+header3d["CUNIT3"] = "Hz"
+header3d["CRPIX3"] = 1.0
+header3d["CRVAL3"] = 1.4e9
+header3d["CDELT3"] = 1.0e6
+fits.PrimaryHDU(data=np.arange(4*120*120, dtype=np.float32).reshape(4, 120, 120), header=header3d).writeto(f"{work}/source3d.fits", overwrite=True)
+
+def write_job(name):
+    payload = {
+        "job_id": name,
+        "job_name": name,
+        "operation": "cutout",
+        "status": "submitting",
+        "phase": "submitting",
+        "message": "Created",
+        "runner": "headless-session",
+        "layer_ids": [],
+        "output_paths": {},
+        "progress_pct": 0.0,
+        "processed_items": 0,
+        "total_items": 1,
+        "completed_bytes": 0,
+        "total_estimated_bytes": 1,
+    }
+    with open(f"{work}/job-{name}/job.json", "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+
+def write_manifest(name, tool, source, target, layer_mode):
+    write_job(name)
+    manifest = {
+        "job_id": name,
+        "job_name": name,
+        "operation": "cutout",
+        "cutout_tool": tool,
+        "layer_mode": layer_mode,
+        "job_paths": {
+            "job_json": f"{work}/job-{name}/job.json",
+            "progress_json": f"{work}/job-{name}/progress.json",
+            "log_path": f"{work}/job-{name}/job.log",
+        },
+        "work_items": [
+            {
+                "source_path": source,
+                "target_path": target,
+                "ra_deg": 180.0,
+                "dec_deg": 0.0,
+                "radius_deg": 0.12,
+                "estimate_bytes": 1048576,
+            }
+        ],
+    }
+    with open(f"{work}/{name}.json", "w", encoding="utf-8") as handle:
+        json.dump(manifest, handle)
+
+write_manifest("astropy", "astropy", f"{work}/source3d.fits", f"{work}/outputs/astropy.fits", "cube3d")
+write_manifest("cutout-fits", "cutout-fits", f"{work}/source2d.fits", f"{work}/outputs/cutout-fits.fits", "image2d")
+PY
+            python -m cutout_worker run --manifest /work/astropy.json
+            python -m cutout_worker run --manifest /work/cutout-fits.json
+            python - <<'PY'
+import json
+import os
+from astropy.io import fits
+
+for name in ("astropy", "cutout-fits"):
+    output = f"/work/outputs/{name}.fits"
+    assert os.path.isfile(output), output
+    with fits.open(output) as hdul:
+        assert hdul[0].data is not None
+    with open(f"/work/job-{name}/progress.json", "r", encoding="utf-8") as handle:
+        progress = json.load(handle)
+    assert progress.get("status") in {"running", "queued", "completed"}
+    assert os.path.isfile(f"/work/job-{name}/job.log")
+PY
+          "
 
       - name: Push image
         run: |

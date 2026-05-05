@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -13,10 +14,11 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy import units as u
 from astropy.wcs import WCS
+from astropy.wcs.utils import proj_plane_pixel_scales
 
 
 CUTOUT_PROGRESS_WEIGHT = 92.0
-SUPPORTED_TOOLS = {"cutout-fits"}
+SUPPORTED_TOOLS = {"astropy", "cutout-fits"}
 
 
 def utc_now_dt() -> datetime:
@@ -158,6 +160,58 @@ def collapse_cube_cutout_to_image(path: str) -> None:
     os.replace(temp_path, path)
 
 
+def run_cutout_astropy(item: Dict[str, Any], log_handle: Any) -> None:
+    source_path = str(item["source_path"])
+    target_path = str(item["target_path"])
+    ra_deg = float(item["ra_deg"])
+    dec_deg = float(item["dec_deg"])
+    radius_deg = max(float(item["radius_deg"]), 0.0001)
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    log_handle.write(f"$ astropy-cutout {source_path} -> {target_path} @ ({ra_deg}, {dec_deg}) r={radius_deg}deg\n")
+    log_handle.flush()
+    sky = SkyCoord(ra_deg * u.deg, dec_deg * u.deg, frame="icrs")
+    with fits.open(source_path, memmap=True) as hdul:
+        rewritten: List[fits.hdu.base.ExtensionHDU] = []
+        cutout_written = False
+        for hdu in hdul:
+            if cutout_written or not isinstance(hdu, (fits.PrimaryHDU, fits.ImageHDU)) or hdu.data is None:
+                rewritten.append(hdu.copy())
+                continue
+            data = np.asarray(hdu.data)
+            if data.ndim < 2:
+                rewritten.append(hdu.copy())
+                continue
+            header = hdu.header.copy()
+            celestial = WCS(header).celestial
+            center_x, center_y = celestial.world_to_pixel(sky)
+            scales = proj_plane_pixel_scales(celestial)
+            scale_x = abs(float(scales[0])) if len(scales) > 0 else 0.0
+            scale_y = abs(float(scales[1])) if len(scales) > 1 else scale_x
+            if scale_x <= 0 or scale_y <= 0:
+                raise RuntimeError(f"Could not determine a valid celestial pixel scale for {source_path}")
+            half_w = max(1, int(math.ceil(radius_deg / scale_x)))
+            half_h = max(1, int(math.ceil(radius_deg / scale_y)))
+            x_center = int(round(center_x))
+            y_center = int(round(center_y))
+            x1 = max(0, x_center - half_w)
+            x2 = min(int(data.shape[-1]), x_center + half_w + 1)
+            y1 = max(0, y_center - half_h)
+            y2 = min(int(data.shape[-2]), y_center + half_h + 1)
+            slicer = [slice(None)] * data.ndim
+            slicer[-1] = slice(x1, x2)
+            slicer[-2] = slice(y1, y2)
+            cutout = np.asarray(data[tuple(slicer)])
+            header["NAXIS1"] = int(cutout.shape[-1])
+            header["NAXIS2"] = int(cutout.shape[-2])
+            if "CRPIX1" in header:
+                header["CRPIX1"] = float(header["CRPIX1"]) - x1
+            if "CRPIX2" in header:
+                header["CRPIX2"] = float(header["CRPIX2"]) - y1
+            rewritten.append(type(hdu)(data=cutout, header=header))
+            cutout_written = True
+        fits.HDUList(rewritten).writeto(target_path, overwrite=True)
+
+
 def run_cutout_fits(item: Dict[str, Any], log_handle: Any) -> subprocess.Popen:
     source_path = str(item["source_path"])
     target_path = str(item["target_path"])
@@ -240,12 +294,11 @@ def run_manifest(manifest_path: str) -> int:
             )
             job = write_job(job_path, progress_path, job)
             append_log(log_path, f"Cutting {basename}")
-            process = run_cutout_fits(item, log_handle)
             target_path = str(item.get("target_path") or "")
             estimate_bytes = max(1, int(item.get("estimate_bytes") or 1))
-            while True:
-                return_code = process.poll()
-                current_size = os.path.getsize(target_path) if os.path.isfile(target_path) else 0
+            if tool == "astropy":
+                run_cutout_astropy(item, log_handle)
+                current_size = os.path.getsize(target_path) if os.path.isfile(target_path) else estimate_bytes
                 visible_total = max(total_estimated_bytes, processed_bytes + remaining_estimate + max(current_size, estimate_bytes))
                 completed = processed_bytes + min(current_size, estimate_bytes)
                 job.update(
@@ -261,11 +314,31 @@ def run_manifest(manifest_path: str) -> int:
                     }
                 )
                 job = write_job(job_path, progress_path, job)
-                if return_code is not None:
-                    if return_code != 0:
-                        raise RuntimeError(f"cutout-fits failed for {basename}")
-                    break
-                time.sleep(0.5)
+            else:
+                process = run_cutout_fits(item, log_handle)
+                while True:
+                    return_code = process.poll()
+                    current_size = os.path.getsize(target_path) if os.path.isfile(target_path) else 0
+                    visible_total = max(total_estimated_bytes, processed_bytes + remaining_estimate + max(current_size, estimate_bytes))
+                    completed = processed_bytes + min(current_size, estimate_bytes)
+                    job.update(
+                        {
+                            "status": "running",
+                            "phase": "cutting",
+                            "progress_pct": min(CUTOUT_PROGRESS_WEIGHT, CUTOUT_PROGRESS_WEIGHT * (completed / max(1, visible_total))),
+                            "completed_bytes": completed,
+                            "total_estimated_bytes": visible_total,
+                            "processed_items": index - 1,
+                            "current_item": basename,
+                            "current_output_path": target_path,
+                        }
+                    )
+                    job = write_job(job_path, progress_path, job)
+                    if return_code is not None:
+                        if return_code != 0:
+                            raise RuntimeError(f"cutout-fits failed for {basename}")
+                        break
+                    time.sleep(0.5)
             if layer_mode == "image2d":
                 collapse_cube_cutout_to_image(target_path)
             actual_size = os.path.getsize(target_path) if os.path.isfile(target_path) else 0

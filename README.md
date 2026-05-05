@@ -25,9 +25,12 @@ The manifest must include:
 - `postprocess`
 - `work_items`
 
-`cutout_tool` is required even when only one tool is available. The v1 allowed value is:
+`cutout_tool` is required even when only one tool is selected by the orchestrator. The currently supported values are:
 
-- `cutout-fits`
+- `astropy` — default, WCS-aware spatial cutouts for 2D images and 3D cubes
+- `cutout-fits` — CLI-based FITS cutout extraction
+
+The worker is intentionally multi-engine from day one. CoolHiPS chooses the engine in the job manifest, and the worker dispatches to the matching adapter inside the same image.
 
 ## Harbor image
 
@@ -54,3 +57,13 @@ Recommended values:
 - `HARBOR_PROJECT=candiapl`
 - `HARBOR_REPOSITORY=canfar-cutout-worker`
 - `HARBOR_IMAGE_TAG=latest`
+
+## Harbor publish workflow
+
+The repo ships a manual `Build and Push to CANFAR Harbor` GitHub Actions workflow. It:
+
+1. builds the image locally in CI
+2. smoke-tests both `astropy` and `cutout-fits` using tiny synthetic FITS inputs
+3. pushes the tagged image to Harbor
+
+That workflow is the intended deployment path for the cutout worker image.
