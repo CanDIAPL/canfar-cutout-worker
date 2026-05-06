@@ -30,8 +30,6 @@ jobs:
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
           HARBOR_REPOSITORY: ${{ secrets.HARBOR_REPOSITORY }}
-          HARBOR_IMAGE_TAG: ${{ secrets.HARBOR_IMAGE_TAG }}
-          HARBOR_IMAGE_TAG_INPUT: ${{ github.event.inputs.image_tag }}
         run: |
           set -euo pipefail
           missing=0
@@ -41,10 +39,6 @@ jobs:
               missing=1
             fi
           done
-          if [ -z "$HARBOR_IMAGE_TAG" ] && [ -z "$HARBOR_IMAGE_TAG_INPUT" ]; then
-            echo "ERROR: Set HARBOR_IMAGE_TAG or provide workflow_dispatch input image_tag" >&2
-            missing=1
-          fi
           if [ "$missing" -ne 0 ]; then
             exit 1
           fi
@@ -68,7 +62,7 @@ jobs:
           project="${project%/}"
           repository="${HARBOR_REPOSITORY#/}"
           repository="${repository%/}"
-          tag="${HARBOR_IMAGE_TAG_INPUT:-$HARBOR_IMAGE_TAG}"
+          tag="${HARBOR_IMAGE_TAG_INPUT:-${HARBOR_IMAGE_TAG:-latest}}"
           sha_tag="sha-${GITHUB_SHA::12}"
 
           {
