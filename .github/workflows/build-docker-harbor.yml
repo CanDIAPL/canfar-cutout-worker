@@ -53,24 +53,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          registry="${HARBOR_URL#http://}"
+          registry="$(printf '%s' "$HARBOR_URL" | tr -d '\r\n')"
+          project="$(printf '%s' "$HARBOR_PROJECT" | tr -d '\r\n')"
+          repository="$(printf '%s' "$HARBOR_REPOSITORY" | tr -d '\r\n')"
+          tag="$(printf '%s' "${HARBOR_IMAGE_TAG_INPUT:-${HARBOR_IMAGE_TAG:-latest}}" | tr -d '\r\n')"
+
+          registry="${registry#http://}"
           registry="${registry#https://}"
           registry="${registry%%/*}"
           registry="${registry%/}"
 
-          project="${HARBOR_PROJECT#/}"
+          project="${project#/}"
           project="${project%/}"
-          repository="${HARBOR_REPOSITORY#/}"
+          repository="${repository#/}"
           repository="${repository%/}"
-          tag="${HARBOR_IMAGE_TAG_INPUT:-${HARBOR_IMAGE_TAG:-latest}}"
           sha_tag="sha-${GITHUB_SHA::12}"
 
           {
-            echo "HARBOR_REGISTRY=$registry"
-            echo "IMAGE_REF=$registry/$project/$repository:$tag"
-            echo "IMAGE_SHA_REF=$registry/$project/$repository:$sha_tag"
-            echo "IMAGE_LATEST_REF=$registry/$project/$repository:latest"
-            echo "DOCKER_CONFIG=$RUNNER_TEMP/docker-config"
+            printf 'HARBOR_REGISTRY=%s\n' "$registry"
+            printf 'IMAGE_REF=%s\n' "$registry/$project/$repository:$tag"
+            printf 'IMAGE_SHA_REF=%s\n' "$registry/$project/$repository:$sha_tag"
+            printf 'IMAGE_LATEST_REF=%s\n' "$registry/$project/$repository:latest"
+            printf 'DOCKER_CONFIG=%s\n' "$RUNNER_TEMP/docker-config"
           } >> "$GITHUB_ENV"
 
       - name: Log in to Harbor
