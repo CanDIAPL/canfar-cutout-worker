@@ -84,7 +84,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$DOCKER_CONFIG"
-          echo "$HARBOR_PASSWORD" | docker login "$HARBOR_REGISTRY" -u "$HARBOR_USERNAME" --password-stdin
+          username="$(printf '%s' "$HARBOR_USERNAME" | tr -d '\r\n')"
+          password="$(printf '%s' "$HARBOR_PASSWORD" | tr -d '\r\n')"
+          docker logout "$HARBOR_REGISTRY" >/dev/null 2>&1 || true
+          printf '%s' "$password" | docker login "$HARBOR_REGISTRY" -u "$username" --password-stdin
 
       - name: Build image
         env:
