@@ -160,6 +160,21 @@ def collapse_cube_cutout_to_image(path: str) -> None:
     os.replace(temp_path, path)
 
 
+def source_has_spectral_axis(source_path: str) -> bool:
+    with fits.open(source_path, memmap=True) as hdul:
+        for hdu in hdul:
+            if not isinstance(hdu, (fits.PrimaryHDU, fits.ImageHDU)) or hdu.data is None:
+                continue
+            data = np.asarray(hdu.data)
+            if data.ndim < 2:
+                continue
+            try:
+                return bool(WCS(hdu.header).has_spectral)
+            except Exception:
+                return False
+    return False
+
+
 def run_cutout_astropy(item: Dict[str, Any], log_handle: Any) -> None:
     source_path = str(item["source_path"])
     target_path = str(item["target_path"])
@@ -221,6 +236,15 @@ def run_cutout_fits(item: Dict[str, Any], log_handle: Any) -> subprocess.Popen:
     dec_deg = float(item["dec_deg"])
     radius_arcmin = max(float(item["radius_deg"]) * 60.0, 0.01)
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    if not source_has_spectral_axis(source_path):
+        log_handle.write(
+            f"$ cutout-fits fallback -> astropy {source_path} -> {target_path} "
+            f"@ ({ra_deg}, {dec_deg}) r={radius_arcmin}arcmin "
+            "[non-spectral FITS input]\n"
+        )
+        log_handle.flush()
+        run_cutout_astropy(item, log_handle)
+        return None
     cutout_cli = shutil.which("cutout-fits")
     command = (
         [cutout_cli, source_path, target_path, str(ra_deg), str(dec_deg), str(radius_arcmin), "-o"]
@@ -318,7 +342,25 @@ def run_manifest(manifest_path: str) -> int:
                 job = write_job(job_path, progress_path, job)
             else:
                 process = run_cutout_fits(item, log_handle)
-                while True:
+                if process is None:
+                    current_size = os.path.getsize(target_path) if os.path.isfile(target_path) else estimate_bytes
+                    visible_total = max(total_estimated_bytes, processed_bytes + remaining_estimate + max(current_size, estimate_bytes))
+                    completed = processed_bytes + min(current_size, estimate_bytes)
+                    job.update(
+                        {
+                            "status": "running",
+                            "phase": "cutting",
+                            "progress_pct": min(CUTOUT_PROGRESS_WEIGHT, CUTOUT_PROGRESS_WEIGHT * (completed / max(1, visible_total))),
+                            "completed_bytes": completed,
+                            "total_estimated_bytes": visible_total,
+                            "processed_items": index - 1,
+                            "current_item": basename,
+                            "current_output_path": target_path,
+                        }
+                    )
+                    job = write_job(job_path, progress_path, job)
+                    process = None
+                while process is not None:
                     return_code = process.poll()
                     current_size = os.path.getsize(target_path) if os.path.isfile(target_path) else 0
                     visible_total = max(total_estimated_bytes, processed_bytes + remaining_estimate + max(current_size, estimate_bytes))
