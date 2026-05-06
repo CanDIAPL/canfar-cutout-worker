@@ -184,6 +184,8 @@ def run_cutout_astropy(item: Dict[str, Any], log_handle: Any) -> None:
             header = hdu.header.copy()
             celestial = WCS(header).celestial
             center_x, center_y = celestial.world_to_pixel(sky)
+            center_x = float(np.asarray(center_x).reshape(-1)[0])
+            center_y = float(np.asarray(center_y).reshape(-1)[0])
             scales = proj_plane_pixel_scales(celestial)
             scale_x = abs(float(scales[0])) if len(scales) > 0 else 0.0
             scale_y = abs(float(scales[1])) if len(scales) > 1 else scale_x
