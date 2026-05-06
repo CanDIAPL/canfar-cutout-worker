@@ -112,7 +112,7 @@ jobs:
           test "$(docker image inspect "$IMAGE_REF" --format '{{ index .Config.Labels "ca.nrc.cadc.skaha.type" }}')" = "headless"
           workdir="$RUNNER_TEMP/cutout-worker-smoke"
           mkdir -p "$workdir"
-          @'
+          cat > "$workdir/prepare.py" <<'PY'
           import json
           import os
           import numpy as np
@@ -215,8 +215,8 @@ jobs:
               f"{work}/outputs/cutout-fits.fits",
               "image2d",
           )
-          '@ | Set-Content -Path "$workdir/prepare.py"
-          @'
+          PY
+          cat > "$workdir/verify.py" <<'PY'
           import json
           import os
           from astropy.io import fits
@@ -230,7 +230,7 @@ jobs:
                   progress = json.load(handle)
               assert progress.get("status") in {"running", "queued", "completed"}
               assert os.path.isfile(f"/work/job-{name}/job.log")
-          '@ | Set-Content -Path "$workdir/verify.py"
+          PY
           docker run --rm --pull=never -v "$workdir:/work" canfar-cutout-worker-ci:local sh -lc '
             set -eu
             python -m cutout_worker --help
